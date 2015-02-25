@@ -11,7 +11,7 @@ import (
 	"github.com/docker/distribution/configuration"
 	"github.com/docker/distribution/registry/handlers"
 	_ "github.com/docker/distribution/registry/storage/driver/filesystem"
-	_ "github.com/openshift/v2reg/pkg/repository"
+	_ "github.com/openshift/openshift-v2-docker-registry/pkg/repository"
 )
 
 func main() {

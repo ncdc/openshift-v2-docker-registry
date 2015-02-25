@@ -29,6 +29,7 @@ func init() {
 type repository struct {
 	distribution.Repository
 
+	registryAddr   string
 	namespace      string
 	repositoryName string
 	openshiftAddr  string
@@ -40,6 +41,7 @@ func newHandler(repo distribution.Repository, options map[string]interface{}) (d
 	certData, _ := options["cert"].(string)
 	certKeyData, _ := options["certKey"].(string)
 	openshiftAddr, _ := options["openshiftAddr"].(string)
+	registryAddr, _ := options["registryAddr"].(string)
 
 	rootPool := x509.NewCertPool()
 	pemBlock, _ := pem.Decode([]byte(caData))
@@ -69,6 +71,7 @@ func newHandler(repo distribution.Repository, options map[string]interface{}) (d
 
 	return &repository{
 		Repository:     repo,
+		registryAddr:   registryAddr,
 		namespace:      nameParts[0],
 		repositoryName: nameParts[1],
 		openshiftAddr:  openshiftAddr,
@@ -137,6 +140,26 @@ func (r *repository) getImage(dgst digest.Digest) (*imageapi.Image, error) {
 	return &image, nil
 }
 
+func (r *repository) getImageRepositoryTag(tag string) (*imageapi.Image, error) {
+	// <-----r.openshiftAddr-------->
+	// https://<server>/osapi/v1beta1/imageRepositoryTags/<repo>?namespace=<ns>
+	imageRepositoryTagUrl := fmt.Sprintf("%s/imageRepositoryTags/%s:%s?namespace=%s", r.openshiftAddr, r.repositoryName, tag, r.namespace)
+	resp, err := r.client.Get(imageRepositoryTagUrl)
+	if err != nil {
+		return nil, fmt.Errorf("Error querying OpenShift for repo:tag: %s", err)
+	}
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("Error reading OpenShift imageRespositoryTag response body: %s", err)
+	}
+	var image imageapi.Image
+	err = json.Unmarshal(body, &image)
+	if err != nil {
+		return nil, fmt.Errorf("Error parsing image: %s", err)
+	}
+	return &image, nil
+}
+
 // Tags lists the tags under the named repository.
 func (r *repository) Tags() ([]string, error) {
 	imageRepository, err := r.getImageRepository()
@@ -163,12 +186,12 @@ func (r *repository) Exists(tag string) (bool, error) {
 
 // Get retrieves the named manifest, if it exists.
 func (r *repository) Get(tag string) (*manifest.SignedManifest, error) {
-	imageRepository, err := r.getImageRepository()
+	image, err := r.getImageRepositoryTag(tag)
 	if err != nil {
 		return nil, err
 	}
 
-	dgst, err := digest.ParseDigest(imageRepository.Tags[tag])
+	dgst, err := digest.ParseDigest(image.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -179,12 +202,7 @@ func (r *repository) Get(tag string) (*manifest.SignedManifest, error) {
 		return nil, err
 	}
 
-	image, err := r.getImage(dgst)
-	if err != nil {
-		return nil, err
-	}
-
-	jsig, err := libtrust.NewJSONSignature([]byte(image.RawManifest), signatures...)
+	jsig, err := libtrust.NewJSONSignature([]byte(image.DockerImageManifest), signatures...)
 	if err != nil {
 		return nil, err
 	}
@@ -239,9 +257,9 @@ func (r *repository) Put(tag string, manifest *manifest.SignedManifest) error {
 			ObjectMeta: kapi.ObjectMeta{
 				Name: dgst.String(),
 			},
-			DockerImageReference: "foo/bar:latest",
+			DockerImageReference: fmt.Sprintf("%s/%s/%s@%s", r.registryAddr, r.namespace, r.repositoryName, dgst.String()),
 			DockerImageMetadata:  runtime.RawExtension{[]byte("{}")},
-			RawManifest:          string(payload),
+			DockerImageManifest:  string(payload),
 		},
 	}
 
@@ -281,5 +299,22 @@ func (r *repository) Put(tag string, manifest *manifest.SignedManifest) error {
 
 // Delete removes the named manifest, if it exists.
 func (r *repository) Delete(tag string) error {
+	imageUrl := fmt.Sprintf("%s/imageRepositoryTags/%s:%s?namespace=%s", r.openshiftAddr, r.repositoryName, tag, r.namespace)
+	req, err := http.NewRequest("DELETE", imageUrl, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := r.client.Do(req)
+	_ = resp
+	if err != nil {
+		return fmt.Errorf("Error deleting image from OpenShift: %s", err)
+	}
+	// TODO check status code / body
+	/*
+		body, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("Error reading OpenShift delete image response body: %s", err)
+		}
+	*/
 	return nil
 }
